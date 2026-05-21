@@ -1,0 +1,18 @@
+# --- Jai build artifacts ---
+/.build/
+/jai-lsp
+/jai-lsp.dSYM/
+
+# --- VSCode extension ---
+vscode-extension/node_modules/
+vscode-extension/out/
+vscode-extension/*.vsix
+
+# --- macOS ---
+.DS_Store
+
+# --- Editor / IDE noise ---
+# (Keep vscode-extension/.vscode/ — its launch.json / tasks.json are part of the dev setup.)
+.idea/
+*.swp
+*.swo

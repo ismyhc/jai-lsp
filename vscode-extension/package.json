@@ -1,0 +1,68 @@
+{
+    "name": "jai-lsp-vscode",
+    "displayName": "Jai LSP",
+    "description": "Language Server Protocol client for the Jai programming language.",
+    "version": "0.0.1",
+    "publisher": "jai-lsp",
+    "engines": {
+        "vscode": "^1.80.0"
+    },
+    "categories": [
+        "Programming Languages"
+    ],
+    "main": "./out/extension.js",
+    "activationEvents": [
+        "onLanguage:jai"
+    ],
+    "contributes": {
+        "languages": [
+            {
+                "id": "jai",
+                "aliases": ["Jai", "jai"],
+                "extensions": [".jai"],
+                "configuration": "./language-configuration.json"
+            }
+        ],
+        "grammars": [
+            {
+                "language": "jai",
+                "scopeName": "source.jai",
+                "path": "./syntaxes/jai.tmLanguage.json"
+            }
+        ],
+        "configuration": {
+            "title": "Jai LSP",
+            "properties": {
+                "jai-lsp.serverPath": {
+                    "type": "string",
+                    "default": "jai-lsp",
+                    "description": "Absolute path to the jai-lsp binary. If unset or a bare name, the system PATH is searched."
+                },
+                "jai-lsp.compilerPath": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Absolute path to the Jai compiler binary (e.g. /Users/you/Development/Tools/jai/bin/jai-macos). Used by the diagnostics subprocess. If unset, the server tries `jai` on PATH — which won't pick up shell aliases."
+                },
+                "jai-lsp.trace.server": {
+                    "type": "string",
+                    "enum": ["off", "messages", "verbose"],
+                    "default": "off",
+                    "description": "Trace LSP messages to/from the server."
+                }
+            }
+        }
+    },
+    "scripts": {
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./",
+        "vscode:prepublish": "npm run compile"
+    },
+    "dependencies": {
+        "vscode-languageclient": "^9.0.1"
+    },
+    "devDependencies": {
+        "@types/node": "^20.0.0",
+        "@types/vscode": "^1.80.0",
+        "typescript": "^5.4.0"
+    }
+}

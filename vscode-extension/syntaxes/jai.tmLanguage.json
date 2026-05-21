@@ -1,0 +1,194 @@
+{
+    "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+    "name": "Jai",
+    "scopeName": "source.jai",
+    "fileTypes": ["jai"],
+
+    "patterns": [
+        { "include": "#comments"            },
+        { "include": "#strings"             },
+        { "include": "#char-literal"        },
+        { "include": "#numbers"             },
+        { "include": "#directives"          },
+        { "include": "#proc-declaration"    },
+        { "include": "#type-declaration"    },
+        { "include": "#proc-call"           },
+        { "include": "#keywords"            },
+        { "include": "#constants"           },
+        { "include": "#types"               },
+        { "include": "#operators"           }
+    ],
+
+    "repository": {
+        "comments": {
+            "patterns": [
+                {
+                    "name": "comment.line.double-slash.jai",
+                    "begin": "//",
+                    "end": "$"
+                },
+                {
+                    "name": "comment.block.jai",
+                    "begin": "/\\*",
+                    "end": "\\*/"
+                }
+            ]
+        },
+
+        "strings": {
+            "patterns": [
+                {
+                    "comment": "Herestring: #string TAG ... TAG. Tag is an identifier on the same line; body runs until a line containing only that tag.",
+                    "name": "string.unquoted.heredoc.jai",
+                    "begin": "(#string(?:,\\\\%)?)\\s+([A-Z_][A-Z0-9_]*)\\s*$",
+                    "beginCaptures": {
+                        "1": { "name": "keyword.directive.jai" },
+                        "2": { "name": "entity.name.tag.jai" }
+                    },
+                    "end": "^\\s*\\2\\s*$",
+                    "endCaptures": {
+                        "0": { "name": "entity.name.tag.jai" }
+                    }
+                },
+                {
+                    "name": "string.quoted.double.jai",
+                    "begin": "\"",
+                    "end": "\"",
+                    "patterns": [
+                        {
+                            "name": "constant.character.escape.jai",
+                            "match": "\\\\(?:[abfnrtv\\\\\"'0]|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})"
+                        }
+                    ]
+                }
+            ]
+        },
+
+        "char-literal": {
+            "comment": "#char \"x\" — Jai's character literal form.",
+            "name": "constant.character.jai",
+            "match": "#char\\s+\"(?:\\\\.|[^\"\\\\])\""
+        },
+
+        "numbers": {
+            "patterns": [
+                {
+                    "name": "constant.numeric.hex.jai",
+                    "match": "\\b0[xh][0-9A-Fa-f_]+\\b"
+                },
+                {
+                    "name": "constant.numeric.binary.jai",
+                    "match": "\\b0b[01_]+\\b"
+                },
+                {
+                    "name": "constant.numeric.float.jai",
+                    "match": "\\b[0-9][0-9_]*\\.[0-9_]+(?:[eE][+-]?[0-9]+)?\\b"
+                },
+                {
+                    "name": "constant.numeric.integer.jai",
+                    "match": "\\b[0-9][0-9_]*\\b"
+                }
+            ]
+        },
+
+        "directives": {
+            "comment": "Any #foo directive. Specific ones (#string) are handled by other rules first.",
+            "name": "keyword.directive.jai",
+            "match": "#[a-z_][a-z_0-9]*"
+        },
+
+        "keywords": {
+            "patterns": [
+                {
+                    "name": "keyword.control.jai",
+                    "match": "\\b(if|ifx|then|else|case|for|while|break|continue|return|defer|remove|using|push_context)\\b"
+                },
+                {
+                    "name": "keyword.declaration.jai",
+                    "match": "\\b(struct|union|enum|enum_flags|interface|operator|inline|no_inline)\\b"
+                },
+                {
+                    "name": "keyword.operator.word.jai",
+                    "match": "\\b(cast|xx|size_of|type_of|code_of|initializer_of|type_info|is_constant)\\b"
+                },
+                {
+                    "name": "variable.language.context.jai",
+                    "match": "\\bcontext\\b"
+                }
+            ]
+        },
+
+        "constants": {
+            "name": "constant.language.jai",
+            "match": "\\b(true|false|null)\\b"
+        },
+
+        "types": {
+            "patterns": [
+                {
+                    "name": "storage.type.primitive.jai",
+                    "match": "\\b(bool|int|s8|s16|s32|s64|u8|u16|u32|u64|float|float32|float64|string|void|Type|Any|Code)\\b"
+                },
+                {
+                    "comment": "Convention: capitalized identifiers are types.",
+                    "name": "entity.name.type.jai",
+                    "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+                }
+            ]
+        },
+
+        "proc-declaration": {
+            "comment": "`name :: (...)` or `name :: inline (...)` — capture name as a proc.",
+            "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*::\\s*(?:inline\\s+|no_inline\\s+)?\\(",
+            "captures": {
+                "1": { "name": "entity.name.function.jai" }
+            }
+        },
+
+        "type-declaration": {
+            "comment": "`name :: struct|union|enum|enum_flags` — capture name as a type.",
+            "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*::\\s*(struct|union|enum|enum_flags)\\b",
+            "captures": {
+                "1": { "name": "entity.name.type.jai" },
+                "2": { "name": "keyword.declaration.jai" }
+            }
+        },
+
+        "proc-call": {
+            "comment": "An identifier followed by `(` is treated as a call site.",
+            "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*\\(",
+            "captures": {
+                "1": { "name": "entity.name.function.call.jai" }
+            }
+        },
+
+        "operators": {
+            "patterns": [
+                {
+                    "name": "keyword.operator.declaration.jai",
+                    "match": "::|:=|->"
+                },
+                {
+                    "name": "keyword.operator.comparison.jai",
+                    "match": "==|!=|<=|>=|<|>"
+                },
+                {
+                    "name": "keyword.operator.logical.jai",
+                    "match": "&&|\\|\\||!"
+                },
+                {
+                    "name": "keyword.operator.arithmetic.jai",
+                    "match": "\\+=|-=|\\*=|/=|%=|\\+|-|\\*|/|%"
+                },
+                {
+                    "name": "keyword.operator.bitwise.jai",
+                    "match": "&|\\||\\^|~|<<|>>"
+                },
+                {
+                    "name": "keyword.operator.assignment.jai",
+                    "match": "="
+                }
+            ]
+        }
+    }
+}
