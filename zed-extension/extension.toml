@@ -1,7 +1,7 @@
 id = "jai"
 name = "Jai"
 description = "Jai language support backed by jai-lsp."
-version = "0.0.4"
+version = "0.1.0"
 schema_version = 1
 authors = ["jai-lsp contributors"]
 repository = "https://github.com/your-account/jai-lsp"
