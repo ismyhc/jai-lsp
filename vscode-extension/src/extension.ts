@@ -29,7 +29,14 @@ function resolveServerPath(ctx: ExtensionContext, configured: string): string {
     const platform = process.platform === "win32" ? "windows" : process.platform;  // darwin/linux/windows
     const arch = process.arch;                                                       // arm64/x64/...
     const bundled = path.join(ctx.extensionPath, "bin", `jai-lsp-${platform}-${arch}${ext}`);
-    if (fs.existsSync(bundled)) return bundled;
+    if (fs.existsSync(bundled)) {
+        // VSIX packaging strips the executable bit on Unix. Restore it
+        // ourselves so spawning the binary doesn't fail with EACCES.
+        if (process.platform !== "win32") {
+            try { fs.chmodSync(bundled, 0o755); } catch { /* best-effort */ }
+        }
+        return bundled;
+    }
 
     return "jai-lsp";
 }

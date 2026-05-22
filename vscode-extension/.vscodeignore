@@ -1,8 +1,13 @@
 .vscode/**
 src/**
-node_modules/**
 tsconfig.json
 .gitignore
 **/*.ts.map
+# Drop dev-only dirs / files in node_modules; keep the runtime deps.
+node_modules/**/test/**
+node_modules/**/tests/**
+node_modules/**/*.md
+node_modules/**/*.ts
+node_modules/**/*.map
 # Keep bin/ INCLUDED — that's where bundled platform binaries live.
 !bin/**
