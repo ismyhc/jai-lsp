@@ -826,6 +826,63 @@ main :: () {
     if (failed > before) dumpOnFailure("Session 13", r);
 }
 
+// --- Session 5b: cross-file semantic tokens ---------------------------------
+console.log("\nSession 5b: cross-file semantic tokens");
+{
+    const before = failed;
+    const fs = await import("node:fs/promises");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "jai-lsp-xfile-"));
+    await fs.writeFile(path.join(tmpDir, "lib.jai"),
+        `do_thing :: (x: int) -> int { return x; }\nThing :: struct { v: int; }\n`);
+    const callerPath = path.join(tmpDir, "caller.jai");
+    const callerText =
+        `main :: () {\n` +
+        `    do_thing(42);\n` +     // call to cross-file proc — should get function color
+        `    t: Thing;\n` +          // ref to cross-file struct — should get struct color
+        `}\n`;
+    await fs.writeFile(callerPath, callerText);
+    const callerUri = `file://${callerPath}`;
+    const rootUri   = `file://${tmpDir}`;
+
+    const r = await runSession([
+        { jsonrpc: "2.0", id: 1, method: "initialize",
+          params: { processId: null, rootUri, capabilities: { general: {} } } },
+        INITIALIZED,
+        { jsonrpc: "2.0", method: "textDocument/didOpen", params: {
+            textDocument: { uri: callerUri, languageId: "jai", version: 1, text: callerText },
+        }},
+        { jsonrpc: "2.0", id: 50, method: "textDocument/semanticTokens/full", params: {
+            textDocument: { uri: callerUri },
+        }},
+        SHUTDOWN, EXIT,
+    ]);
+    try { await fs.rm(tmpDir, { recursive: true, force: true }); } catch {}
+
+    const legend: string[] = r.responses[1]?.result?.capabilities?.semanticTokensProvider?.legend?.tokenTypes ?? [];
+    const idxFunction = legend.indexOf("function");
+    const idxStruct   = legend.indexOf("struct");
+
+    const data: number[] = r.responses[50]?.result?.data ?? [];
+    // Decode delta-encoded tokens.
+    const decoded: { line: number; col: number; len: number; type: number }[] = [];
+    let line = 0, col = 0;
+    for (let i = 0; i < data.length; i += 5) {
+        const [dl, ds, len, t] = [data[i], data[i+1], data[i+2], data[i+3]];
+        if (dl !== 0) { line += dl; col = ds; } else { col += ds; }
+        decoded.push({ line, col, len, type: t });
+    }
+    const find = (line: number, col: number) => decoded.find(d => d.line === line && d.col === col);
+
+    check("do_thing call at (1,4) is function", find(1, 4)?.type === idxFunction,
+        `got ${JSON.stringify(find(1, 4))}; all=${JSON.stringify(decoded)}`);
+    check("Thing ref at (2,7) is struct",     find(2, 7)?.type === idxStruct,
+        `got ${JSON.stringify(find(2, 7))}`);
+    check("clean exit",                       r.exitCode === 0);
+    if (failed > before) dumpOnFailure("Session 5b", r);
+}
+
 // --- Session 6: diagnostics on a bad file -----------------------------------
 console.log("\nSession 6: lex-level diagnostics");
 {

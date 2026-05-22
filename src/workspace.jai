@@ -20,6 +20,7 @@
 #import "File_Utilities";
 #import "Hash_Table";
 #import "String";
+#import "Thread";
 
 Workspace_Symbol :: struct {
     name:   string;
@@ -29,12 +30,30 @@ Workspace_Symbol :: struct {
     range:  Range;        // identifier range, in negotiated encoding
 }
 
+// Thread-safe workspace symbol index.
+//
+// Concurrency model:
+//   * `mutex` guards by_name, by_uri, and scanned.
+//   * The initial workspace_scan runs on a background thread spawned via
+//     workspace_scan_async. It calls workspace_index_uri per file, each of
+//     which takes the lock briefly.
+//   * Main-thread handlers (hover, definition, references, completion,
+//     workspace/symbol) lock before reading. workspace_find / workspace_get
+//     return values that are safe to use after unlock (strings copied onto
+//     the temporary allocator).
+//   * didOpen / didChange / didClose / didChangeWatchedFiles also mutate
+//     under lock.
 Workspace :: struct {
     root_path:   string;             // absolute filesystem path; "" if no root
     encoding:    Position_Encoding;  // pinned from initialize negotiation
     by_name:     Table(string, [..] Workspace_Symbol);
     by_uri:      Table(string, [..] string);
     scanned:     bool;
+
+    mutex:        Mutex;
+    scan_thread:  Thread;
+    scan_running: bool;
+    scan_joined:  bool;        // tracked so thread_deinit fires at most once
 }
 
 // --- Lifecycle --------------------------------------------------------------
@@ -42,12 +61,18 @@ Workspace :: struct {
 workspace_set_root :: (ws: *Workspace, root_path: string, encoding: Position_Encoding) {
     ws.root_path = copy_string(root_path);
     ws.encoding  = encoding;
+    init(*ws.mutex, "jai-lsp-workspace");
 }
 
+// Synchronous scan (used by the worker thread; also fine to call directly
+// for single-shot work). Locks per file while updating the index, so other
+// threads making lookups stay responsive.
 workspace_scan :: (ws: *Workspace) {
     if !ws.root_path.count {
         log("Workspace: no root configured, skipping scan");
+        lock(*ws.mutex);
         ws.scanned = true;
+        unlock(*ws.mutex);
         return;
     }
     log("Workspace: scanning %", ws.root_path);
@@ -56,43 +81,106 @@ workspace_scan :: (ws: *Workspace) {
     visitor_data.ws = ws;
     visit_files(ws.root_path, true, *visitor_data, visit_jai_file);
 
-    log("Workspace: scan complete, % files indexed, % distinct names", visitor_data.file_count, ws.by_name.count);
+    lock(*ws.mutex);
+    distinct := ws.by_name.count;
     ws.scanned = true;
+    unlock(*ws.mutex);
+
+    log("Workspace: scan complete, % files indexed, % distinct names", visitor_data.file_count, distinct);
+}
+
+// Spawn the scan on a worker thread so the LSP main loop stays responsive.
+// Returns immediately. handlers run normally; lookups against by_name see
+// whatever's been indexed so far (lock-protected).
+workspace_scan_async :: (ws: *Workspace) {
+    if ws.scan_running {
+        log("Workspace: scan already running, ignoring duplicate request");
+        return;
+    }
+    ws.scan_running = true;
+    ok := thread_init(*ws.scan_thread, scan_thread_proc);
+    if !ok {
+        log_error("Workspace: thread_init failed, falling back to sync scan");
+        ws.scan_running = false;
+        workspace_scan(ws);
+        return;
+    }
+    ws.scan_thread.data = ws;
+    thread_start(*ws.scan_thread);
+}
+
+scan_thread_proc :: (thread: *Thread) -> s64 {
+    ws := cast(*Workspace) thread.data;
+    workspace_scan(ws);
+    ws.scan_running = false;
+    return 0;
+}
+
+// Block until the scan thread finishes. Safe to call multiple times —
+// readers (definition, workspace/symbol, completion, ...) call this before
+// touching the index so they don't miss late entries. The OS-level cleanup
+// (thread_deinit) only happens once, in workspace_join_scan_thread on
+// shutdown.
+workspace_wait_for_scan :: (ws: *Workspace) {
+    if ws.scan_joined return;
+    if !ws.scan_running return;
+    thread_is_done(*ws.scan_thread, -1);   // -1 = wait indefinitely
+}
+
+// One-time thread cleanup. Called on shutdown only.
+workspace_join_scan_thread :: (ws: *Workspace) {
+    workspace_wait_for_scan(ws);
+    if !ws.scan_joined {
+        ws.scan_joined = true;
+        thread_deinit(*ws.scan_thread);
+    }
 }
 
 // Index a single file from text in memory. Replaces any prior entries for
 // the same URI. Used both during the disk scan and for open-buffer refreshes.
+// Acquires the workspace mutex internally.
 workspace_index_uri :: (ws: *Workspace, uri: string, text: string) {
-    // Drop the prior contributions for this URI, if any.
-    workspace_purge_uri(ws, uri);
-
+    // Lex + position-math OUTSIDE the lock — those are CPU-bound and don't
+    // touch shared state. Only the table update needs to be exclusive.
     decls := find_top_level_decls(text);
-    if !decls.count return;
-
-    // Build a line-start index for position math. Lives on temp; we copy
-    // only the converted Range into the long-lived store.
+    if !decls.count {
+        lock(*ws.mutex);
+        defer unlock(*ws.mutex);
+        purge_uri_locked(ws, uri);
+        return;
+    }
     line_starts := compute_line_starts(text);
     defer array_free(line_starts);
 
-    uri_copy := copy_string(uri);
-    names_for_uri: [..] string;
-
+    // Build the symbol list off-lock.
+    new_syms: [..] Workspace_Symbol;
+    new_syms.allocator = temp;
     for d: decls {
         range := decl_to_range(text, line_starts, d, ws.encoding);
         sym: Workspace_Symbol;
-        sym.name   = copy_string(d.name);
-        sym.detail = d.detail;       // detail strings are static literals — no copy needed
+        sym.name   = copy_string(d.name);     // heap-owned; survives temp reset
+        sym.detail = d.detail;                // static string literal
         sym.kind   = d.kind;
-        sym.uri    = uri_copy;
         sym.range  = range;
+        array_add(*new_syms, sym);
+    }
 
+    lock(*ws.mutex);
+    defer unlock(*ws.mutex);
+
+    purge_uri_locked(ws, uri);
+
+    uri_copy := copy_string(uri);
+    names_for_uri: [..] string;
+    for * sym: new_syms {
+        sym.uri = uri_copy;
         slot := table_find_pointer(*ws.by_name, sym.name);
         if !slot {
             list: [..] Workspace_Symbol;
-            array_add(*list, sym);
+            array_add(*list, sym.*);
             table_set(*ws.by_name, sym.name, list);
         } else {
-            array_add(slot, sym);
+            array_add(slot, sym.*);
         }
         array_add(*names_for_uri, sym.name);
     }
@@ -114,16 +202,21 @@ workspace_reindex_from_disk :: (ws: *Workspace, uri: string) {
 }
 
 // Drop all symbol entries that came from `uri`. Used before re-indexing the
-// same URI, and on file deletion.
+// same URI, and on file deletion. Public; acquires the lock.
 workspace_purge_uri :: (ws: *Workspace, uri: string) {
+    lock(*ws.mutex);
+    defer unlock(*ws.mutex);
+    purge_uri_locked(ws, uri);
+}
+
+// Internal: same as workspace_purge_uri but caller already holds the lock.
+purge_uri_locked :: (ws: *Workspace, uri: string) {
     found, names := table_find(*ws.by_uri, uri);
     if !found return;
 
     for name: names {
         slot := table_find_pointer(*ws.by_name, name);
         if !slot continue;
-        // Remove every entry that came from this URI. There can be more
-        // than one (e.g. shadowed names) — wipe them all.
         new_list: [..] Workspace_Symbol;
         for slot.* {
             if it.uri != uri array_add(*new_list, it);
@@ -142,13 +235,87 @@ workspace_purge_uri :: (ws: *Workspace, uri: string) {
 
 // --- Lookup -----------------------------------------------------------------
 
+// Returns a temp-allocated snapshot of the named slot. Strings are also
+// copied onto temp so the result remains safe to use after the workspace
+// mutex is released. Waits for any in-flight initial scan first so we
+// don't return empty just because indexing is still running.
 workspace_find :: (ws: *Workspace, name: string) -> [] Workspace_Symbol {
+    workspace_wait_for_scan(ws);
+
+    out: [..] Workspace_Symbol;
+    out.allocator = temp;
+
+    lock(*ws.mutex);
+    defer unlock(*ws.mutex);
+
     found, list := table_find(*ws.by_name, name);
-    if !found {
-        empty: [] Workspace_Symbol;
-        return empty;
+    if !found return out;
+
+    for list array_add(*out, snapshot_symbol(it));
+    return out;
+}
+
+// Snapshot ALL workspace symbols (optionally filtered by name predicate),
+// returning a temp-allocated list safe to use after unlock. Used by
+// workspace/symbol search and completion when the caller needs to iterate
+// without holding the lock.
+workspace_snapshot_all :: (ws: *Workspace, name_filter: (string) -> bool = null, limit: int = -1) -> [] Workspace_Symbol {
+    workspace_wait_for_scan(ws);
+
+    out: [..] Workspace_Symbol;
+    out.allocator = temp;
+
+    lock(*ws.mutex);
+    defer unlock(*ws.mutex);
+
+    for slot, name: ws.by_name {
+        if limit >= 0 && out.count >= limit break;
+        if name_filter && !name_filter(name) continue;
+        for slot {
+            if limit >= 0 && out.count >= limit break;
+            array_add(*out, snapshot_symbol(it));
+        }
     }
-    return list;
+    return out;
+}
+
+// Snapshot of all URIs currently in the index. Useful for find-references
+// which needs to iterate every indexed file.
+workspace_snapshot_uris :: (ws: *Workspace) -> [] string {
+    workspace_wait_for_scan(ws);
+
+    out: [..] string;
+    out.allocator = temp;
+
+    lock(*ws.mutex);
+    defer unlock(*ws.mutex);
+
+    for _, uri: ws.by_uri {
+        array_add(*out, copy_string(uri,, temp));
+    }
+    return out;
+}
+
+// Cheap "what kind is this name?" lookup. Used by the semantic-tokens
+// pass: for each IDENT not declared locally, we ask "is this a known
+// cross-file proc/struct/enum?" Returns the kind of the first matching
+// entry plus a found flag.
+workspace_lookup_kind :: (ws: *Workspace, name: string) -> Symbol_Kind, bool {
+    lock(*ws.mutex);
+    defer unlock(*ws.mutex);
+    found, list := table_find(*ws.by_name, name);
+    if !found || !list.count return .CONSTANT, false;
+    return list[0].kind, true;
+}
+
+snapshot_symbol :: (sym: Workspace_Symbol) -> Workspace_Symbol {
+    out: Workspace_Symbol;
+    out.name   = copy_string(sym.name,, temp);
+    out.detail = sym.detail;                   // static literal — no copy
+    out.kind   = sym.kind;
+    out.uri    = copy_string(sym.uri,, temp);
+    out.range  = sym.range;
+    return out;
 }
 
 // --- URI <-> path -----------------------------------------------------------

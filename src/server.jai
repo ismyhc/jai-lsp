@@ -210,7 +210,7 @@ handle_initialized :: (server: *Server) {
     // This blocks the loop briefly; for a Jai-sized project it's fast.
     // Future: hand this to a worker thread so we don't stall message
     // processing on huge repos.
-    workspace_scan(*server.workspace);
+    workspace_scan_async(*server.workspace);
 
     // Entry-file resolution is explicit only (env var → jai-lsp.entryFile
     // setting). We used to auto-detect by searching the workspace for a
@@ -231,6 +231,9 @@ handle_shutdown :: (server: *Server, id: *JSON_Value) {
         drain_pending(*server.pending);
         tick_pending_check(server);
     }
+
+    // Wait for the workspace scan thread to finish, then clean it up.
+    workspace_join_scan_thread(*server.workspace);
 
     // Per spec, the response result for shutdown is null.
     if id send_result(id, "null");
@@ -547,7 +550,7 @@ handle_semantic_tokens_full :: (server: *Server, id: *JSON_Value, envelope_obj: 
     doc := store_get(*server.docs, uri);
     if !doc       { send_result(id, "null"); return; }
 
-    data, _ := analyze_document(doc, server.position_encoding);
+    data, _ := analyze_document(doc, server.position_encoding, *server.workspace);
     payload := Semantic_Tokens.{ data = data };
     send_result(id, json_write_string(payload, indent_char = ""));
 }
@@ -990,8 +993,9 @@ handle_references :: (server: *Server, id: *JSON_Value, envelope_obj: *JSON_Obje
         table_set(*seen, open_uri, true);
     }
 
-    // Then disk-only files.
-    for _, ws_uri: server.workspace.by_uri {
+    // Then disk-only files. Snapshot the URI list under the workspace lock
+    // before iterating so we don't hold it during file reads.
+    for ws_uri: workspace_snapshot_uris(*server.workspace) {
         found, _ := table_find(*seen, ws_uri);
         if found continue;
         path := path_from_uri(ws_uri);
@@ -1101,21 +1105,19 @@ handle_workspace_symbol :: (server: *Server, id: *JSON_Value, envelope_obj: *JSO
     results: [..] LSP_Workspace_Symbol;
     results.allocator = temp;
 
-    // Walk the workspace index, keep entries whose name contains `query`
-    // (case-insensitive substring; VSCode's ⌘T further refines client-side).
-    // Empty query → return everything up to the cap.
-    for slot, name: server.workspace.by_name {
+    // Walk a snapshot of the workspace index, keeping entries whose name
+    // contains `query` (case-insensitive). Snapshot lives on temp and
+    // releases the workspace lock immediately so concurrent scan/indexing
+    // isn't blocked while we build the response.
+    syms := workspace_snapshot_all(*server.workspace, null, WORKSPACE_SYMBOL_LIMIT * 2);
+    for sym: syms {
         if results.count >= WORKSPACE_SYMBOL_LIMIT break;
-        if query.count && !name_matches_query(name, query) continue;
-
-        for sym: slot {
-            if results.count >= WORKSPACE_SYMBOL_LIMIT break;
-            array_add(*results, LSP_Workspace_Symbol.{
-                name     = sym.name,
-                kind     = cast(int) sym.kind,
-                location = .{ uri = sym.uri, range = sym.range },
-            });
-        }
+        if query.count && !name_matches_query(sym.name, query) continue;
+        array_add(*results, LSP_Workspace_Symbol.{
+            name     = sym.name,
+            kind     = cast(int) sym.kind,
+            location = .{ uri = sym.uri, range = sym.range },
+        });
     }
 
     send_result(id, json_write_string(results, indent_char = ""));
@@ -1153,14 +1155,19 @@ handle_completion :: (server: *Server, id: *JSON_Value, envelope_obj: *JSON_Obje
     items: [..] Completion_Item;
     items.allocator = temp;
 
-    // Workspace symbols.
-    for slot, name: server.workspace.by_name {
-        if !slot.count continue;
-        first := slot[0];
+    // Workspace symbols. Snapshot under the workspace lock; dedupe by
+    // name client-side (same-named overloads collapse to one entry).
+    syms := workspace_snapshot_all(*server.workspace);
+    seen_names: Table(string, bool);
+    seen_names.allocator = temp;
+    for sym: syms {
+        already, _ := table_find(*seen_names, sym.name);
+        if already continue;
+        table_set(*seen_names, sym.name, true);
         array_add(*items, Completion_Item.{
-            label  = name,
-            kind   = cast(int) symbol_kind_to_completion_kind(first.kind),
-            detail = first.detail,
+            label  = sym.name,
+            kind   = cast(int) symbol_kind_to_completion_kind(sym.kind),
+            detail = sym.detail,
         });
     }
 

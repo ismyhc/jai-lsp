@@ -27,3 +27,7 @@ zed-extension/grammars/
 .idea/
 *.swp
 *.swo
+# Emacs auto-save / backup files
+\#*\#
+.\#*
+*~

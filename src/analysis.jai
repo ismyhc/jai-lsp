@@ -50,7 +50,7 @@ ST_ENUM     :: 5;
 // allocated on the temporary allocator — caller must serialize/forward
 // before the next reset_temporary_storage().
 
-analyze_document :: (doc: *Document, encoding: Position_Encoding) -> tokens: [] u32, diagnostics: [] Diagnostic {
+analyze_document :: (doc: *Document, encoding: Position_Encoding, workspace: *Workspace = null) -> tokens: [] u32, diagnostics: [] Diagnostic {
     tokens:      [..] u32;       tokens.allocator      = temp;
     diagnostics: [..] Diagnostic; diagnostics.allocator = temp;
 
@@ -64,6 +64,11 @@ analyze_document :: (doc: *Document, encoding: Position_Encoding) -> tokens: [] 
     // tokens by their actual kind (function vs struct vs enum). This is
     // what avoids "every IDENT is `variable`" mush — only confident
     // classifications get emitted.
+    //
+    // ident_kind also serves as a per-pass cache for cross-file workspace
+    // lookups: the first time we see an IDENT not in local decls, we ask
+    // the workspace and store the result here so subsequent occurrences
+    // skip the locked lookup.
     decls := find_top_level_decls(doc.text);
     ident_kind: Table(string, Symbol_Kind);
     ident_kind.allocator = temp;
@@ -92,7 +97,7 @@ analyze_document :: (doc: *Document, encoding: Position_Encoding) -> tokens: [] 
                 break;
             }
 
-            sem := classify_token(tok, *ident_kind);
+            sem := classify_token(tok, *ident_kind, workspace);
             if sem >= 0 emit_token(*tokens, doc, encoding, tok, sem, *prev_line, *prev_col);
             eat_token(*lexer);
         }
@@ -603,21 +608,33 @@ Token_Snap :: struct {
     name:           string;     // populated for IDENT
 }
 
-classify_token :: (tok: *Token, ident_kind: *Table(string, Symbol_Kind)) -> int {
+classify_token :: (tok: *Token, ident_kind: *Table(string, Symbol_Kind), workspace: *Workspace) -> int {
     t := tok.type;
     if t == .STRING return ST_STRING;
     if t == .NUMBER return ST_NUMBER;
 
     if t == .IDENT {
-        // Only classify identifiers we have certainty about. Plain variables
-        // and cross-file references stay un-tokenized so the TextMate
-        // grammar's coloring wins.
-        found, kind := table_find(ident_kind, tok.ident_value.name);
+        name := tok.ident_value.name;
+        found, kind := table_find(ident_kind, name);
+
+        // Not declared locally — fall back to the workspace symbol index
+        // so cross-file proc/struct/enum references get the same color
+        // as their same-file siblings. Memoize the result on ident_kind
+        // so repeat occurrences in this file skip the locked lookup.
+        if !found && workspace {
+            ws_kind, ws_found := workspace_lookup_kind(workspace, name);
+            if ws_found {
+                kind  = ws_kind;
+                found = true;
+                table_set(ident_kind, name, kind);
+            }
+        }
+
         if !found return -1;
         if kind == .FUNCTION return ST_FUNCTION;
         if kind == .STRUCT   return ST_STRUCT;
         if kind == .ENUM     return ST_ENUM;
-        return -1;   // constants etc. — leave to grammar
+        return -1;   // constants / variables — leave to grammar
     }
 
     int_t := cast(s32) t;

@@ -79,12 +79,47 @@ Optional:
 }
 ```
 
-### Neovim / Emacs / Helix
+### Emacs
+
+A starter Emacs 29+ package lives in [`emacs/`](emacs/) that:
+
+- Defines `jai-ts-mode` (tree-sitter font-lock + indentation) and
+  auto-associates with `.jai` files.
+- Wires Eglot to launch `jai-lsp` for those buffers.
+- Exposes `M-x customize-group RET jai-lsp` for the same compiler /
+  entry-file / inlay-hint settings as the other editors.
+
+> **Status: lightly tested** — Eglot connects and highlighting works;
+> completion / signature-help / hover go through standard Eglot commands
+> but the project author hasn't exercised them in daily use. See
+> `emacs/README.md` for the install snippet.
+
+### Neovim (LazyVim / lazy.nvim)
+
+A starter Neovim plugin lives in [`nvim/`](nvim/). One-line install:
+
+```lua
+-- ~/.config/nvim/lua/plugins/jai.lua
+return {
+    {
+        "ismyhc/jai-lsp",
+        ft = "jai",
+        opts = {
+            compiler_path = "/Users/you/Development/Tools/jai/bin/jai-macos",
+        },
+        dependencies = { "nvim-treesitter/nvim-treesitter" },
+    },
+}
+```
+
+Then `:TSInstall jai` once. See `nvim/README.md` for the full setting list
+and `packer.nvim` / `vim-plug` snippets.
+
+### Helix
 
 The server speaks plain LSP — point any LSP client at the `jai-lsp` binary
-and you're set. For syntax highlighting, the `tree-sitter-jai/` directory
-ships the grammar; see its README for editor-specific install snippets
-(nvim-treesitter, Emacs 29+ tree-sitter, Helix `languages.toml`).
+and you're set. See `tree-sitter-jai/README.md` for the
+`languages.toml` snippet.
 
 ### Zed
 
@@ -148,6 +183,8 @@ test/
   smoke.ts                 # bun-driven LSP smoke tests (13 sessions, ~100 checks)
 vscode-extension/          # ~50-line TS shim using vscode-languageclient
 zed-extension/             # Zed extension (registers jai language)
+emacs/                     # Emacs 29+ package — jai-ts-mode + Eglot wiring
+nvim/                      # Neovim plugin — filetype + tree-sitter + LSP attach
 tree-sitter-jai/           # Vendored tree-sitter grammar — originally constantitus/tree-sitter-jai (MIT-0), see Credits
 package.jai                # `jai package.jai` → builds binary + drops into extension bin/ dirs
 ```
@@ -276,6 +313,12 @@ invoked.
 All server diagnostics go to **stderr**, which the VSCode extension surfaces
 in `Output → Jai Language Server`. Set `jai-lsp.trace.server: "verbose"` for
 full wire-level traces.
+
+## Releasing
+
+The step-by-step for cutting a new release (building binaries per platform,
+creating the GitHub release, publishing the VSCode + Zed extensions) lives
+in [`RELEASING.md`](RELEASING.md).
 
 ## Credits
 
