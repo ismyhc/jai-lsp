@@ -55,9 +55,11 @@ Server_Capabilities :: struct {
     hoverProvider:          bool = true;
     documentSymbolProvider:  bool = true;
     definitionProvider:      bool = true;
+    typeDefinitionProvider:  bool = true;
     referencesProvider:      bool = true;
     workspaceSymbolProvider: bool = true;
     foldingRangeProvider:    bool = true;
+    inlayHintProvider:       bool = true;
     completionProvider:      Completion_Options;
     signatureHelpProvider:   Signature_Help_Options;
 
@@ -194,6 +196,16 @@ Parameter_Information :: struct {
     label: [2] int;
 }
 
+// --- Inlay hints ------------------------------------------------------------
+
+Inlay_Hint :: struct {
+    position:     Position;
+    label:        string;
+    paddingLeft:  bool = false;
+    paddingRight: bool = false;
+    kind:         int  = 1;     // 1 = Type, 2 = Parameter
+}
+
 // --- Folding ranges ---------------------------------------------------------
 
 Folding_Range :: struct {
@@ -295,7 +307,10 @@ Text_Document_Identifier :: struct {
 // --- Hover ------------------------------------------------------------------
 
 Hover_Result :: struct {
-    contents: string;   // simple Markdown/plain-text form; richer forms
-                        // (MarkupContent, MarkedString[]) can come later.
-    // range: *Range;   // optional; we omit it for the stub.
+    contents: Markup_Content;
+}
+
+Markup_Content :: struct {
+    kind:  string = "markdown";
+    value: string;
 }

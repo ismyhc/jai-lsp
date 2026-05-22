@@ -1,0 +1,20 @@
+id = "jai"
+name = "Jai"
+description = "Jai language support backed by jai-lsp."
+version = "0.0.4"
+schema_version = 1
+authors = ["jai-lsp contributors"]
+repository = "https://github.com/your-account/jai-lsp"
+
+# Tree-sitter grammar — Zed clones this on install and builds it. Without
+# a grammar registered, Zed won't recognize .jai files at all (so the LSP
+# never attaches). Using constantitus/tree-sitter-jai — community grammar,
+# most actively maintained option as of writing.
+[grammars.jai]
+repository = "https://github.com/constantitus/tree-sitter-jai"
+commit = "2763e5001856ea7b5047e780e8dec95a07072d59"
+
+# Register the language. The actual config lives in languages/jai/config.toml.
+[language_servers.jai-lsp]
+name = "jai-lsp"
+languages = ["Jai"]

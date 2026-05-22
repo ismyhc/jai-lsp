@@ -148,9 +148,9 @@ console.log("\nSession 2: text sync + hover (utf-16 default)");
         { jsonrpc: "2.0", method: "textDocument/didClose", params: { textDocument: { uri } } },
         SHUTDOWN, EXIT,
     ]);
-    check("hover 'foo'",   r.responses[10]?.result?.contents === "`foo`",   `got ${JSON.stringify(r.responses[10]?.result)}`);
-    check("hover 'greet'", r.responses[11]?.result?.contents === "`greet`", `got ${JSON.stringify(r.responses[11]?.result)}`);
-    check("hover 'hello'", r.responses[12]?.result?.contents === "`hello`", `got ${JSON.stringify(r.responses[12]?.result)}`);
+    check("hover 'foo'",   r.responses[10]?.result?.contents?.value === "`foo`",   `got ${JSON.stringify(r.responses[10]?.result)}`);
+    check("hover 'greet'", r.responses[11]?.result?.contents?.value === "`greet`", `got ${JSON.stringify(r.responses[11]?.result)}`);
+    check("hover 'hello'", r.responses[12]?.result?.contents?.value === "`hello`", `got ${JSON.stringify(r.responses[12]?.result)}`);
     check("clean exit",    r.exitCode === 0);
     if (failed > before) dumpOnFailure("Session 2", r);
 }
@@ -173,7 +173,7 @@ console.log("\nSession 3: utf-8 negotiation");
         SHUTDOWN, EXIT,
     ]);
     check("negotiated positionEncoding=utf-8", r.responses[1]?.result?.capabilities?.positionEncoding === "utf-8");
-    check("hover still resolves",              r.responses[20]?.result?.contents === "`foo`");
+    check("hover still resolves",              r.responses[20]?.result?.contents?.value === "`foo`");
     check("clean exit",                        r.exitCode === 0);
     if (failed > before) dumpOnFailure("Session 3", r);
 }
@@ -195,7 +195,7 @@ console.log("\nSession 4: utf-16 with multi-byte chars");
         }},
         SHUTDOWN, EXIT,
     ]);
-    check("utf-16 position lands on 'beta'", r.responses[30]?.result?.contents === "`beta`",
+    check("utf-16 position lands on 'beta'", r.responses[30]?.result?.contents?.value === "`beta`",
         `got ${JSON.stringify(r.responses[30]?.result)}`);
     check("clean exit",                       r.exitCode === 0);
     if (failed > before) dumpOnFailure("Session 4", r);
@@ -727,6 +727,97 @@ console.log("\nSession 12: signature help");
 
     check("clean exit", r.exitCode === 0);
     if (failed > before) dumpOnFailure("Session 12", r);
+}
+
+// --- Session 13: AST-backed hover + typeDefinition + inlay hints ------------
+// Requires the Jai compiler reachable via JAI_COMPILER env. Skips otherwise.
+if (!process.env.JAI_COMPILER) {
+    console.log("\nSession 13: SKIPPED (JAI_COMPILER not set)");
+} else {
+    console.log("\nSession 13: AST-backed hover, typeDefinition, inlay hints");
+    const before = failed;
+    const fs = await import("node:fs/promises");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "jai-lsp-ast-"));
+    const file = path.join(tmpDir, "ast.jai");
+    const text =
+`#import "Basic";
+
+Vec :: struct {
+    x: float;
+    y: float;
+}
+
+add :: (a: int, b: int) -> int { return a + b; }
+
+main :: () {
+    v: Vec;
+    sum := add(1, 2);
+    print("%\\n", sum);
+}
+`;
+    await fs.writeFile(file, text);
+    const uri = `file://${file}`;
+    const rootUri = `file://${tmpDir}`;
+
+    const r = await runSession([
+        { jsonrpc: "2.0", id: 1, method: "initialize",
+          params: { processId: null, rootUri, capabilities: { general: {} } } },
+        INITIALIZED,
+        { jsonrpc: "2.0", method: "textDocument/didOpen", params: {
+            textDocument: { uri, languageId: "jai", version: 1, text }
+        }},
+        // Trigger a check — synchronous; by the next request, AST is loaded.
+        { jsonrpc: "2.0", method: "textDocument/didSave", params: { textDocument: { uri } } },
+        // Hover on `add` at line 7 character 0 (the decl)
+        { jsonrpc: "2.0", id: 130, method: "textDocument/hover", params: {
+            textDocument: { uri }, position: { line: 7, character: 0 }
+        }},
+        // Hover on `Vec` at line 2 character 0
+        { jsonrpc: "2.0", id: 131, method: "textDocument/hover", params: {
+            textDocument: { uri }, position: { line: 2, character: 0 }
+        }},
+        // typeDefinition on `v` (line 10, `    v: Vec;`) — should jump to Vec
+        { jsonrpc: "2.0", id: 132, method: "textDocument/typeDefinition", params: {
+            textDocument: { uri }, position: { line: 10, character: 4 }
+        }},
+        // Inlay hints across the document
+        { jsonrpc: "2.0", id: 133, method: "textDocument/inlayHint", params: {
+            textDocument: { uri }, range: { start: { line: 0, character: 0 }, end: { line: 14, character: 0 } }
+        }},
+        SHUTDOWN, EXIT,
+    ]);
+    try { await fs.rm(tmpDir, { recursive: true, force: true }); } catch {}
+
+    check("typeDefinitionProvider=true", r.responses[1]?.result?.capabilities?.typeDefinitionProvider === true);
+    check("inlayHintProvider=true",       r.responses[1]?.result?.capabilities?.inlayHintProvider === true);
+
+    const hover_add: any = r.responses[130]?.result;
+    check("hover(add) returns markdown",  hover_add?.contents?.kind === "markdown");
+    check("hover(add) includes signature",
+        ((hover_add?.contents?.value ?? "") as string).includes("add ::") &&
+        ((hover_add?.contents?.value ?? "") as string).includes("s64"),
+        `got ${JSON.stringify(hover_add?.contents?.value)}`);
+
+    const hover_vec: any = r.responses[131]?.result;
+    check("hover(Vec) labels as struct",
+        ((hover_vec?.contents?.value ?? "") as string).includes("Vec :: struct"),
+        `got ${JSON.stringify(hover_vec?.contents?.value)}`);
+
+    const type_def: any[] = r.responses[132]?.result ?? [];
+    check("typeDefinition(v) returns a Location", type_def.length >= 1,
+        `got ${JSON.stringify(type_def)}`);
+    check("typeDefinition(v) points to ast.jai", (type_def[0]?.uri ?? "").endsWith("/ast.jai"));
+    check("typeDefinition(v) line is Vec's line (2)", type_def[0]?.range?.start?.line === 2);
+
+    const hints: any[] = r.responses[133]?.result ?? [];
+    const sum_hint = hints.find((h: any) => h?.label?.includes("s64") || h?.label?.includes("int"));
+    check("inlay hint for `sum` includes its type", !!sum_hint,
+        `got ${JSON.stringify(hints)}`);
+
+    check("clean exit", r.exitCode === 0);
+    if (failed > before) dumpOnFailure("Session 13", r);
 }
 
 // --- Session 6: diagnostics on a bad file -----------------------------------

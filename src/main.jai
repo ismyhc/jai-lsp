@@ -22,18 +22,28 @@ main :: () {
     log("jai-lsp starting up (pid awareness not yet wired)");
 
     server: Server;
+    server.inlay_hints_enabled = env_bool("JAI_LSP_INLAY_HINTS", default=true);
+    server.entry_file          = env_string("JAI_LSP_ENTRY_FILE");
+    log("jai-lsp: inlay_hints_enabled=%", server.inlay_hints_enabled);
+    if server.entry_file.count log("jai-lsp: entry_file=% (from env)", server.entry_file);
 
     while server.running {
-        body, ok := read_message();
-        if !ok {
-            // Clean EOF or unrecoverable framing error. Either way, the
-            // session is done. We don't honor the shutdown/exit dance here
-            // because there's no client left to honor it with.
-            log("jai-lsp: stdin closed or unreadable; ending session");
-            break;
+        // If a type-check subprocess is in flight, poll stdin with a short
+        // timeout so we can also tick the check. When idle, block until a
+        // message arrives.
+        timeout_ms := ifx server.pending.status == .RUNNING then 25 else -1;
+
+        if poll_stdin(timeout_ms) {
+            body, ok := read_message();
+            if !ok {
+                log("jai-lsp: stdin closed or unreadable; ending session");
+                break;
+            }
+            handle_message(*server, body);
         }
 
-        handle_message(*server, body);
+        // Tick the in-flight check (if any). When it finishes, publish.
+        tick_pending_check(*server);
 
         // All per-message scratch (parsed JSON tree, serialized response
         // bytes, log message buffers) was allocated on temp storage. Drop

@@ -1,0 +1,35 @@
+{
+  "grammars": [
+    {
+      "name": "jai",
+      "camelcase": "Jai",
+      "scope": "source.jai",
+      "path": ".",
+      "file-types": ["jai"],
+      "highlights": "queries/highlights.scm",
+      "injection-regex": "^jai$"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT-0",
+    "description": "tree-sitter grammar for the language",
+    "authors": [
+      {
+        "name": "constantitus",
+        "email": "constantitus@gmail.com"
+      }
+    ],
+    "links": {
+      "repository": "https://github.com/constantitus/tree-sitter-jai"
+    }
+  },
+  "bindings": {
+    "c": true,
+    "go": true,
+    "node": true,
+    "python": true,
+    "rust": true,
+    "swift": true
+  }
+}

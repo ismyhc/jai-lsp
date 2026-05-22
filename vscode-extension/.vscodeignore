@@ -4,3 +4,5 @@ node_modules/**
 tsconfig.json
 .gitignore
 **/*.ts.map
+# Keep bin/ INCLUDED — that's where bundled platform binaries live.
+!bin/**

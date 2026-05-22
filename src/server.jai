@@ -46,6 +46,30 @@ Server :: struct {
     // notification (so position encoding negotiation has already happened)
     // and kept in sync with open documents via didOpen/didChange/didClose.
     workspace: Workspace;
+
+    // Compiler-derived AST index. Refreshed after every successful didSave
+    // check (the metaprogram writes a sidecar; we ingest it). Powers
+    // hover-with-types, goto type definition, and inlay hints.
+    ast: Ast_Index;
+
+    // Read once at startup from the JAI_LSP_INLAY_HINTS env var (default on).
+    // Editors that don't have a native per-language inlay-hint toggle can
+    // disable jai-lsp's hints by setting the env var to "0" / "false" / "off".
+    inlay_hints_enabled: bool = true;
+
+    // Path to compile when running the type-check pass. Resolution order:
+    //   1. JAI_LSP_ENTRY_FILE env var (passed from VSCode setting)
+    //   2. Auto-detected after workspace scan (first file with `main :: ()`)
+    //   3. Empty — fall back to compiling the file the user has open
+    //
+    // Setting this matters for multi-file projects: without it, compiling
+    // a leaf file in isolation may not pull in the modules it needs (e.g.
+    // `Windows :: #import "Windows";` declared in a sibling file).
+    entry_file: string;
+
+    // Background type-check state. Only one runs at a time; if a new check
+    // is triggered while one is running we kill+replace.
+    pending: Pending_Check;
 }
 
 handle_message :: (server: *Server, body: string) {
@@ -101,7 +125,9 @@ handle_message :: (server: *Server, body: string) {
         case "textDocument/semanticTokens/full";  handle_semantic_tokens_full(server, id, obj);
         case "textDocument/documentSymbol";       handle_document_symbol(server, id, obj);
         case "textDocument/definition";           handle_definition(server, id, obj);
+        case "textDocument/typeDefinition";       handle_type_definition(server, id, obj);
         case "textDocument/references";           handle_references(server, id, obj);
+        case "textDocument/inlayHint";            handle_inlay_hint(server, id, obj);
         case "textDocument/completion";           handle_completion(server, id, obj);
         case "textDocument/signatureHelp";        handle_signature_help(server, id, obj);
         case "textDocument/foldingRange";         handle_folding_range(server, id, obj);
@@ -181,10 +207,26 @@ handle_initialized :: (server: *Server) {
     // Future: hand this to a worker thread so we don't stall message
     // processing on huge repos.
     workspace_scan(*server.workspace);
+
+    // Entry-file resolution is explicit only (env var → jai-lsp.entryFile
+    // setting). We used to auto-detect by searching the workspace for a
+    // `main :: ()` decl, but that picked wrong in projects with multiple
+    // mains (examples, sibling tools) and made hovers go stale on files
+    // outside the picked entry's import graph. Better to compile per-file
+    // by default and let the user opt into project-wide checks.
 }
 
 handle_shutdown :: (server: *Server, id: *JSON_Value) {
     server.shutdown_received = true;
+
+    // Drain any pending check so its diagnostics get published before we
+    // respond. Tests synchronize on the response; production clients also
+    // expect to see the final state.
+    if server.pending.status == .RUNNING {
+        log("Server: draining pending check before shutdown response");
+        drain_pending(*server.pending);
+        tick_pending_check(server);
+    }
 
     // Per spec, the response result for shutdown is null.
     if id send_result(id, "null");
@@ -222,6 +264,12 @@ handle_did_open :: (server: *Server, envelope_obj: *JSON_Object) {
     // disk scan saw with the live text.
     workspace_index_uri(*server.workspace, uri, text);
     publish_diagnostics(server, uri);
+
+    // Always run the compiler check on open. The AST it produces covers
+    // whichever compile target we choose (entry_file when set, else this
+    // file). Skipping when the AST is already populated would leave you
+    // hovering on a file the previous check didn't reach.
+    run_check_for_uri(server, uri);
 }
 
 handle_did_change :: (server: *Server, envelope_obj: *JSON_Object) {
@@ -280,26 +328,61 @@ handle_did_save :: (server: *Server, envelope_obj: *JSON_Object) {
     if !uri_ok return;
 
     log("Server: didSave % — running compiler check", uri);
+    run_check_for_uri(server, uri);
+}
 
-    path := path_from_uri(uri);
-    if !path.count return;
+// Shared by didOpen and didSave: kick off an ASYNC compiler check. The
+// main loop polls the subprocess and publishes diagnostics when it
+// finishes (see tick_pending_check). Returns immediately.
+run_check_for_uri :: (server: *Server, uri: string) {
+    open_path := path_from_uri(uri);
+    if !open_path.count return;
+
+    // What we hand to the compiler. Prefer the configured/auto-detected
+    // entry file so all imports get pulled in; fall back to the open file
+    // for single-file workflows.
+    compile_target := ifx server.entry_file.count then server.entry_file else open_path;
 
     doc := store_get(*server.docs, uri);
     doc_text := ifx doc then doc.text else "";
 
-    // Type-check pass via subprocess. Blocks the loop until it returns.
-    // Diagnostics for THIS file are sent unconditionally — empty array
-    // clears any prior errors from the previous save. doc_text is used to
-    // widen diagnostic ranges over the offending token.
-    diags := run_check(path, doc_text, server.position_encoding);
+    start_check(*server.pending, compile_target, open_path, doc_text, uri, server.position_encoding);
+}
 
+// If a check is running, block until it finishes and process the result.
+// Used by handlers whose answer depends on the AST (hover-with-types,
+// typeDefinition, inlay hints) so the user gets fresh data even if they
+// triggered the check moments earlier.
+wait_for_pending_check :: (server: *Server) {
+    if server.pending.status != .RUNNING return;
+    drain_pending(*server.pending);
+    tick_pending_check(server);
+}
+
+// Called every main-loop iteration. Pulls subprocess output, and when the
+// check finishes: loads the AST sidecar, publishes diagnostics.
+tick_pending_check :: (server: *Server) {
+    if server.pending.status == .INACTIVE return;
+    if poll_check(*server.pending) return;  // still running
+
+    // Finished. Build diagnostics, refresh AST, publish.
+    diags := finalize_check(*server.pending);
+
+    if ast_load_sidecar(*server.ast, AST_SIDECAR_PATH) {
+        log("Server: AST index refreshed (% names)", server.ast.by_name.count);
+    }
+
+    doc := store_get(*server.docs, server.pending.open_uri);
     version := ifx doc then doc.version else 0;
     params := Publish_Diagnostics_Params.{
-        uri         = uri,
+        uri         = server.pending.open_uri,
         version     = version,
         diagnostics = diags,
     };
     send_notification("textDocument/publishDiagnostics", json_write_string(params, indent_char = ""));
+
+    // Reset pending state so we're ready for the next check.
+    free_pending(*server.pending);
 }
 
 // --- Hover (stub: echoes the identifier under the cursor) -------------------
@@ -332,8 +415,71 @@ handle_hover :: (server: *Server, id: *JSON_Value, envelope_obj: *JSON_Object) {
     word := word_at_position(doc, line, character, server.position_encoding);
     if !word.count { send_result(id, "null"); return; }
 
-    hover := Hover_Result.{ contents = tprint("`%`", word) };
+    // If a type-check is in flight, drain it before answering — the AST
+    // index that powers this hover is populated by that check, and a
+    // hover-right-after-save would otherwise return only the fallback.
+    wait_for_pending_check(server);
+
+    value := render_hover_markdown(server, word);
+    hover := Hover_Result.{ contents = .{ value = value } };
     send_result(id, json_write_string(hover, indent_char = ""));
+}
+
+// Build the markdown body for a hover popup. If the AST index has type
+// information for `name`, render it as a code block. Otherwise fall back
+// to back-ticking the identifier (so hovers still respond before the first
+// save populates the AST).
+render_hover_markdown :: (server: *Server, name: string) -> string {
+    matches := ast_find(*server.ast, name);
+    if !matches.count return tprint("`%`", name);
+
+    // Dedupe: for type aliases like `Vec :: struct {...}`, the metaprogram
+    // emits both a `constant`-kind entry (type = "Type") and a `struct`-kind
+    // entry. Prefer the more informative one.
+    chosen := matches[0];
+    for matches {
+        if it.kind == "struct" || it.kind == "enum" {
+            chosen = it;
+            break;
+        }
+    }
+
+    sb: String_Builder;
+    sb.allocator = temp;
+    append(*sb, "```jai\n");
+    append_hover_line(*sb, name, chosen);
+    // If there are multiple matches (overloads, or proc + type definition),
+    // show the rest too. Skip the one we already rendered.
+    for matches {
+        if it.kind == chosen.kind && it.type == chosen.type && it.file == chosen.file && it.line == chosen.line continue;
+        append(*sb, "\n");
+        append_hover_line(*sb, name, it);
+    }
+    append(*sb, "\n```");
+    return builder_to_string(*sb,, temp);
+}
+
+append_hover_line :: (sb: *String_Builder, name: string, sym: Ast_Symbol) {
+    PROC_PREFIX :: "procedure ";
+    if sym.kind == "struct" {
+        print_to_builder(sb, "% :: struct", name);
+        return;
+    }
+    if sym.kind == "enum" {
+        print_to_builder(sb, "% :: enum", name);
+        return;
+    }
+    if sym.kind == "constant" {
+        if starts_with(sym.type, PROC_PREFIX) {
+            sig := slice(sym.type, PROC_PREFIX.count, sym.type.count - PROC_PREFIX.count);
+            print_to_builder(sb, "% :: %", name, sig);
+            return;
+        }
+        print_to_builder(sb, "% :: %", name, sym.type);
+        return;
+    }
+    // Variable.
+    print_to_builder(sb, "%: %", name, sym.type);
 }
 
 // Return the identifier the cursor sits on (or just past), or empty string
@@ -575,6 +721,197 @@ snap_to_byte :: (line_1based: s32, col_1based: s32, line_starts: [] int) -> int 
 }
 
 #scope_export
+
+// --- Goto type definition --------------------------------------------------
+//
+// LSP method: textDocument/typeDefinition. The user is on an identifier;
+// we look up its declared type, find the type's source location via the
+// AST index, and return that as the navigation target.
+
+handle_type_definition :: (server: *Server, id: *JSON_Value, envelope_obj: *JSON_Object) {
+    if !id return;
+
+    params_obj, _ := jv_object(envelope_obj, "params");
+    if !params_obj { send_result(id, "null"); return; }
+    td_obj,     _ := jv_object(params_obj, "textDocument");
+    pos_obj,    _ := jv_object(params_obj, "position");
+    if !td_obj || !pos_obj { send_result(id, "null"); return; }
+
+    uri, uri_ok   := jv_string(td_obj, "uri");
+    line, _       := jv_int(pos_obj, "line");
+    character, _  := jv_int(pos_obj, "character");
+    if !uri_ok    { send_result(id, "null"); return; }
+
+    doc := store_get(*server.docs, uri);
+    if !doc       { send_result(id, "null"); return; }
+
+    word := word_at_position(doc, line, character, server.position_encoding);
+    if !word.count { send_result(id, "null"); return; }
+
+    wait_for_pending_check(server);
+
+    // First look up the identifier itself. If the identifier IS already a
+    // type name (struct/enum), jump to its declaration directly.
+    matches := ast_find(*server.ast, word);
+    for matches {
+        if it.kind == "struct" || it.kind == "enum" {
+            send_result(id, json_write_string(ast_symbol_locations(.[it], server.position_encoding), indent_char = ""));
+            return;
+        }
+    }
+
+    // Otherwise extract the type-name from the symbol's `type` field and
+    // resolve THAT to a struct/enum entry.
+    type_name := first_type_identifier(ifx matches.count then matches[0].type else "");
+    if !type_name.count { send_result(id, "null"); return; }
+
+    type_matches := ast_find(*server.ast, type_name);
+    if !type_matches.count { send_result(id, "null"); return; }
+
+    // Prefer struct/enum entries; fall back to whatever we have.
+    chosen: [..] Ast_Symbol;
+    chosen.allocator = temp;
+    for type_matches {
+        if it.kind == "struct" || it.kind == "enum" array_add(*chosen, it);
+    }
+    if !chosen.count for type_matches array_add(*chosen, it);
+
+    send_result(id, json_write_string(ast_symbol_locations(chosen, server.position_encoding), indent_char = ""));
+}
+
+// Convert a slice of AST symbols into LSP Location[] for navigation.
+// The compiler reports (line, col) as 1-based bytes. We translate to LSP's
+// 0-based (line, col-in-encoding). The end position is a 1-char range — we
+// don't know the symbol's extent from the AST alone.
+ast_symbol_locations :: (syms: [] Ast_Symbol, encoding: Position_Encoding) -> [] Location {
+    out: [..] Location;
+    out.allocator = temp;
+    for s: syms {
+        if !s.file.count continue;
+        uri := uri_from_path(s.file);
+
+        // We don't have line_starts for this file readily; punt the encoding
+        // conversion and assume ASCII columns (works for the common case).
+        line0 := s.line - 1;
+        col0  := s.col  - 1;
+        if line0 < 0 line0 = 0;
+        if col0  < 0 col0  = 0;
+
+        loc: Location;
+        loc.uri = uri;
+        loc.range.start.line      = line0;
+        loc.range.start.character = col0;
+        loc.range.end.line        = line0;
+        loc.range.end.character   = col0 + 1;
+        array_add(*out, loc);
+    }
+    return out;
+}
+
+// From a type string like "Vec", "[..] Vec", "*Vec", "[5] Map(string, int)",
+// extract the first identifier that's a candidate for the type's name. Plain
+// heuristic: skip any of `*[ ]., 0-9 space ..`, take the first
+// letter-leading identifier-like run.
+first_type_identifier :: (s: string) -> string {
+    i := 0;
+    while i < s.count {
+        if is_ident_start(s[i]) {
+            start := i;
+            while i < s.count && is_ident_continue(s[i]) i += 1;
+            ident: string;
+            ident.data  = s.data + start;
+            ident.count = i - start;
+            // "procedure " is the prefix the compiler uses for proc types;
+            // skip it so we get the real first type identifier in the
+            // signature.
+            if ident == "procedure" continue;
+            return ident;
+        }
+        i += 1;
+    }
+    return "";
+}
+
+// --- Inlay hints (inferred type annotations for `x := ...`) ----------------
+//
+// We only emit hints for cases where the user wrote `x :=` and the AST
+// tells us the type. The hint appears RIGHT AFTER `x` and reads `: <Type>`.
+
+handle_inlay_hint :: (server: *Server, id: *JSON_Value, envelope_obj: *JSON_Object) {
+    if !id return;
+
+    if !server.inlay_hints_enabled {
+        // Empty array, not null — clients treat null as "not supported" which
+        // can disable the capability entirely.
+        send_result(id, "[]");
+        return;
+    }
+
+    params_obj, _ := jv_object(envelope_obj, "params");
+    if !params_obj { send_result(id, "null"); return; }
+    td_obj,     _ := jv_object(params_obj, "textDocument");
+    if !td_obj    { send_result(id, "null"); return; }
+    uri, uri_ok   := jv_string(td_obj, "uri");
+    if !uri_ok    { send_result(id, "null"); return; }
+
+    doc := store_get(*server.docs, uri);
+    if !doc       { send_result(id, "null"); return; }
+
+    wait_for_pending_check(server);
+
+    // Cross-reference: every Ast_Symbol whose file matches this URI and is
+    // a "variable" kind (i.e. `name := expr` decl). We could also surface
+    // them for `name: T = expr` but those already show the type explicitly.
+    target_file := path_from_uri(uri);
+    if !target_file.count { send_result(id, "null"); return; }
+
+    hints: [..] Inlay_Hint;
+    hints.allocator = temp;
+
+    for slot, _: server.ast.by_name {
+        for sym: slot {
+            if sym.file != target_file continue;
+            if sym.kind != "variable"  continue;
+            // Position the hint just after the identifier. The lexer hands
+            // us the col of the identifier's first byte; we want its END.
+            // Without the identifier length, approximate by walking the
+            // document text.
+            ident_end_col := identifier_end_column(doc.text, doc.line_starts, sym.line - 1, sym.col - 1);
+            if ident_end_col < 0 continue;
+
+            h: Inlay_Hint;
+            h.position.line      = sym.line - 1;
+            h.position.character = byte_col_to_encoding_col(doc.text, doc.line_starts, sym.line - 1, ident_end_col, server.position_encoding);
+            h.label              = tprint(": %", sym.type);
+            h.paddingLeft        = false;
+            h.paddingRight       = true;
+            h.kind               = 1;   // Type
+            array_add(*hints, h);
+        }
+    }
+
+    send_result(id, json_write_string(hints, indent_char = ""));
+}
+
+// Find the end (exclusive) byte column of the identifier starting at
+// (line, start_col_bytes). Returns -1 if the position isn't on an identifier.
+identifier_end_column :: (text: string, line_starts: [] int, line: int, start_col_bytes: int) -> int {
+    if line < 0 || line >= line_starts.count return -1;
+    line_start := line_starts[line];
+    pos := line_start + start_col_bytes;
+    if pos < 0 || pos >= text.count return -1;
+    if !is_ident_start(text[pos]) return -1;
+    end := pos;
+    while end < text.count && is_ident_continue(text[end]) end += 1;
+    return start_col_bytes + (end - pos);
+}
+
+is_ident_start :: (b: u8) -> bool {
+    if b == #char "_" return true;
+    if b >= #char "A" && b <= #char "Z" return true;
+    if b >= #char "a" && b <= #char "z" return true;
+    return false;
+}
 
 // --- Find all references ---------------------------------------------------
 

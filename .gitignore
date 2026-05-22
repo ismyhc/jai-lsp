@@ -1,5 +1,6 @@
 # --- Jai build artifacts ---
 /.build/
+/.build-package/
 /jai-lsp
 /jai-lsp.dSYM/
 
@@ -7,6 +8,16 @@
 vscode-extension/node_modules/
 vscode-extension/out/
 vscode-extension/*.vsix
+# Bundled binaries — drop them in per-platform when packaging, keep them out of git.
+vscode-extension/bin/jai-lsp-*
+
+# --- Zed extension (Rust/WASM) ---
+zed-extension/target/
+zed-extension/Cargo.lock
+zed-extension/bin/jai-lsp-*
+# Built by Zed at extension-install time; not source.
+zed-extension/extension.wasm
+zed-extension/grammars/
 
 # --- macOS ---
 .DS_Store

@@ -1,0 +1,81 @@
+================================================================================
+member function call
+================================================================================
+
+t := Math.cos(1) + Math.cos(2) + Math.cos(3);
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (declarations_that_require_a_semicolon
+      (variable_declaration
+        (identifier)
+        (binary_expression
+          (binary_expression
+            (call_expression
+              (member_expression
+                (identifier)
+                (identifier))
+              (assignment_parameters
+                (integer)))
+            (call_expression
+              (member_expression
+                (identifier)
+                (identifier))
+              (assignment_parameters
+                (integer))))
+          (call_expression
+            (member_expression
+              (identifier)
+              (identifier))
+            (assignment_parameters
+              (integer))))))))
+
+================================================================================
+multiple assignment with member function call
+================================================================================
+
+s, t := Math.cos(1) + Math.cos(2) + Math.cos(3), Math.cos(10) + Math.cos(20);
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (declarations_that_require_a_semicolon
+      (variable_declaration
+        (identifier)
+        (identifier)
+        (binary_expression
+          (binary_expression
+            (call_expression
+              (member_expression
+                (identifier)
+                (identifier))
+              (assignment_parameters
+                (integer)))
+            (call_expression
+              (member_expression
+                (identifier)
+                (identifier))
+              (assignment_parameters
+                (integer))))
+          (call_expression
+            (member_expression
+              (identifier)
+              (identifier))
+            (assignment_parameters
+              (integer))))
+        (binary_expression
+          (call_expression
+            (member_expression
+              (identifier)
+              (identifier))
+            (assignment_parameters
+              (integer)))
+          (call_expression
+            (member_expression
+              (identifier)
+              (identifier))
+            (assignment_parameters
+              (integer))))))))

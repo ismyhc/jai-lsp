@@ -1,0 +1,13 @@
+[package]
+name = "jai-zed-extension"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Pin to whatever your local Zed version expects. Newer Zed versions tend
+# to require a specific zed_extension_api version — bump as needed.
+zed_extension_api = "0.1.0"

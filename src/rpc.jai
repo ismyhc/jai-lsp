@@ -49,6 +49,22 @@ read_message :: () -> body: string, ok: bool {
     return body, true;
 }
 
+// Wait up to `timeout_ms` for stdin to have data ready. Returns true if
+// poll() reports POLLIN set. -1 = block indefinitely; 0 = pure non-blocking
+// check; positive = timeout in milliseconds.
+//
+// Used by the main loop so it can interleave between handling messages and
+// polling background work (e.g., the in-flight type-check subprocess)
+// without spinning.
+poll_stdin :: (timeout_ms: int) -> bool {
+    pfd: pollfd;
+    pfd.fd = STDIN_FILENO;
+    pfd.events = POLLIN;
+    n := poll(*pfd, 1, xx timeout_ms);
+    if n <= 0 return false;
+    return (pfd.revents & POLLIN) != 0;
+}
+
 // Write a framed message. `body` is the JSON payload bytes.
 write_message :: (body: string) {
     // Header + body in two write(2) calls. We don't need to fuse them — the

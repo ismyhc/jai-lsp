@@ -35,13 +35,23 @@
             "properties": {
                 "jai-lsp.serverPath": {
                     "type": "string",
-                    "default": "jai-lsp",
-                    "description": "Absolute path to the jai-lsp binary. If unset or a bare name, the system PATH is searched."
+                    "default": "",
+                    "description": "Absolute path to the jai-lsp binary. If empty, the extension uses the platform binary bundled in bin/ (e.g. bin/jai-lsp-darwin-arm64); if no bundled binary exists for your platform, it falls back to `jai-lsp` on PATH."
                 },
                 "jai-lsp.compilerPath": {
                     "type": "string",
                     "default": "",
                     "description": "Absolute path to the Jai compiler binary (e.g. /Users/you/Development/Tools/jai/bin/jai-macos). Used by the diagnostics subprocess. If unset, the server tries `jai` on PATH — which won't pick up shell aliases."
+                },
+                "jai-lsp.inlayHints.enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Whether jai-lsp emits inlay hints (inferred-type annotations like `: s64` after `x :=`). Disable if you find them noisy. Note: VSCode also has a per-language `editor.inlayHints.enabled` setting that works without reloading."
+                },
+                "jai-lsp.entryFile": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Absolute path to your project's entry file (the one with `main :: ()`). When set, the type-check pass compiles THIS file regardless of which file you have open, so cross-module hovers and goto-type-definition work. If unset, jai-lsp tries to auto-detect by finding any file in the workspace that declares `main :: ()`. If THAT fails, it falls back to compiling whatever file you have open (which may miss imports declared in sibling files)."
                 },
                 "jai-lsp.trace.server": {
                     "type": "string",
