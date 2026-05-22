@@ -15,7 +15,7 @@ editor can drive it. Ships with a VSCode extension and a Zed extension.
 | **Document Outline** (⌘⇧O) | Top-level procs/structs/enums/constants in this file | Lexer |
 | **Workspace Symbol Search** (⌘T) | Fuzzy-search every top-level symbol in the project | Lexer |
 | **Semantic Tokens** | Coloring for keywords/strings/numbers + this-file's decls (functions, structs, enums) | Lexer + AST |
-| **Diagnostics on Save** | Real compile errors with red squiggles, e.g. `Undeclared identifier 'foo'` | Subprocess `jai` with `output_type=NO_OUTPUT` |
+| **Diagnostics on Save** | Real compile errors with red squiggles, e.g. `Undeclared identifier 'foo'`. **Requires `jai-lsp.entryFile` set** — without it diagnostics are suppressed to avoid cascade errors from standalone-file compiles. | Subprocess `jai` with `output_type=NO_OUTPUT` |
 | **Folding Ranges** | Collapse `{...}` blocks | Lexer |
 | **Completion** | Workspace symbols + Jai keywords (context-free) | Workspace index |
 | **Signature Help** | Type `foo(` → popup with `(a: int, b: int) -> int`, active-param highlight | Lexer + source extraction |
@@ -122,7 +122,7 @@ in Zed settings (`Cmd+,`):
 |---|---|---|
 | `jai-lsp.serverPath`         | `"jai-lsp"`        | Server binary path. PATH lookup if bare name |
 | `jai-lsp.compilerPath`       | `""`               | Absolute path to Jai compiler. Shell aliases don't survive subprocess spawn — set this explicitly |
-| `jai-lsp.entryFile`          | `""`               | Project entry file (the one with `main :: ()`). Set this for multi-file projects so all imports get type-checked. Unset = compile per-file |
+| `jai-lsp.entryFile`          | `""`               | Project entry file (the one with `main :: ()`). When set: compile-check uses this file, diagnostics flow. **When unset: compile still runs on the open file so hover/typeDef/inlay hints keep working, but diagnostics are suppressed** (standalone leaf-file compiles usually produce cascade-error noise). |
 | `jai-lsp.inlayHints.enabled` | `true`             | Whether to emit `: Type` annotations after `:=` |
 | `jai-lsp.trace.server`       | `"off"`            | LSP message trace level (VSCode) |
 
@@ -269,7 +269,7 @@ invoked.
 | Symptom | Likely cause |
 |---|---|
 | **"jai-lsp failed to start"** | `serverPath` doesn't resolve. Set to an absolute path |
-| **Diagnostics empty even with broken code** | `compilerPath` unset or wrong; check `Output → Jai Language Server` for the `Couldn't launch process` line |
+| **Diagnostics empty even with broken code** | Either `jai-lsp.entryFile` isn't set (diagnostics suppressed by design — see Settings table), or `compilerPath` is wrong. Check `Output → Jai Language Server` for either the "set jai-lsp.entryFile" hint or a "Couldn't launch process" line |
 | **Hover shows just the back-ticked name** | AST index empty for this symbol — either you haven't saved yet, or the symbol lives in a module the entry-file compile doesn't pull in. Set `jai-lsp.entryFile` to the right entry point. |
 | **"crashed N times in M minutes"** | Server-side bug. Reproduce with `bun test/smoke.ts` (sometimes spots it) or run the binary manually with the failing input on stdin. |
 
@@ -290,4 +290,8 @@ tree-sitter-tlaplus, tree-sitter-php).
 
 ## License
 
-See LICENSE (not yet added).
+[MIT](LICENSE) © 2026 Jacob Davis.
+
+The vendored grammar in `tree-sitter-jai/` is separately licensed under
+**MIT-0** by its original author (see `tree-sitter-jai/LICENSE` and the
+Credits section above).

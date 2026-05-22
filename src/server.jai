@@ -70,6 +70,10 @@ Server :: struct {
     // Background type-check state. Only one runs at a time; if a new check
     // is triggered while one is running we kill+replace.
     pending: Pending_Check;
+
+    // Tracks whether we've already logged the "set entryFile" hint this
+    // session, so we don't repeat it on every save / open.
+    entry_file_hint_logged: bool;
 }
 
 handle_message :: (server: *Server, body: string) {
@@ -334,19 +338,34 @@ handle_did_save :: (server: *Server, envelope_obj: *JSON_Object) {
 // Shared by didOpen and didSave: kick off an ASYNC compiler check. The
 // main loop polls the subprocess and publishes diagnostics when it
 // finishes (see tick_pending_check). Returns immediately.
+//
+// We always run the check (so hover-with-types / type def / inlay hints
+// get fresh AST data) but only PUBLISH diagnostics when `jai-lsp.entryFile`
+// is set. Without an entry file, compiling a random leaf file standalone
+// usually produces cascade errors ("semicolon expected" on every line
+// after the first undeclared identifier) that are pure noise — so we
+// suppress those at publish time.
 run_check_for_uri :: (server: *Server, uri: string) {
     open_path := path_from_uri(uri);
     if !open_path.count return;
 
-    // What we hand to the compiler. Prefer the configured/auto-detected
-    // entry file so all imports get pulled in; fall back to the open file
-    // for single-file workflows.
+    // What to hand the compiler: the configured entry file if set, else
+    // the file the user is editing.
     compile_target := ifx server.entry_file.count then server.entry_file else open_path;
 
     doc := store_get(*server.docs, uri);
     doc_text := ifx doc then doc.text else "";
 
     start_check(*server.pending, compile_target, open_path, doc_text, uri, server.position_encoding);
+}
+
+log_entry_file_hint_once :: (server: *Server) {
+    if server.entry_file_hint_logged return;
+    server.entry_file_hint_logged = true;
+    log("Server: suppressed % diagnostics from standalone-file check.", 0);
+    log("Server: Set `jai-lsp.entryFile` in your editor settings to your project's");
+    log("Server: main file to get real diagnostics. Hover/typeDef/inlay hints work");
+    log("Server: either way using whatever AST data the check produced.");
 }
 
 // If a check is running, block until it finishes and process the result.
@@ -365,7 +384,8 @@ tick_pending_check :: (server: *Server) {
     if server.pending.status == .INACTIVE return;
     if poll_check(*server.pending) return;  // still running
 
-    // Finished. Build diagnostics, refresh AST, publish.
+    // Finished. Refresh AST regardless (powers hover-with-types etc.) and
+    // decide whether to publish diagnostics based on entry_file setting.
     diags := finalize_check(*server.pending);
 
     if ast_load_sidecar(*server.ast, AST_SIDECAR_PATH) {
@@ -374,10 +394,21 @@ tick_pending_check :: (server: *Server) {
 
     doc := store_get(*server.docs, server.pending.open_uri);
     version := ifx doc then doc.version else 0;
+
+    // Without an entry file, suppress diagnostics — a standalone compile of
+    // a leaf file usually cascades into noise. Hover/typeDef/inlay hints
+    // still benefit from whatever AST data the check produced.
+    publish_diags: [] Diagnostic;
+    if server.entry_file.count {
+        publish_diags = diags;
+    } else {
+        if diags.count log_entry_file_hint_once(server);
+    }
+
     params := Publish_Diagnostics_Params.{
         uri         = server.pending.open_uri,
         version     = version,
-        diagnostics = diags,
+        diagnostics = publish_diags,
     };
     send_notification("textDocument/publishDiagnostics", json_write_string(params, indent_char = ""));
 

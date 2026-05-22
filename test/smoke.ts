@@ -43,8 +43,11 @@ type SessionResult = {
     stderr: string;
     exitCode: number;
 };
-async function runSession(messages: Msg[]): Promise<SessionResult> {
-    const proc = Bun.spawn([BIN], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+async function runSession(messages: Msg[], extraEnv: Record<string, string> = {}): Promise<SessionResult> {
+    const proc = Bun.spawn([BIN], {
+        stdin: "pipe", stdout: "pipe", stderr: "pipe",
+        env: { ...process.env, ...extraEnv } as Record<string, string>,
+    });
     for (const m of messages) proc.stdin.write(frame(m));
     await proc.stdin.end();
 
@@ -761,6 +764,9 @@ main :: () {
     const uri = `file://${file}`;
     const rootUri = `file://${tmpDir}`;
 
+    // Session 13 needs the compile-check to actually run, so we point
+    // JAI_LSP_ENTRY_FILE at the test's own file. Without this the new
+    // gating skips the check and AST features fall back to lex-only.
     const r = await runSession([
         { jsonrpc: "2.0", id: 1, method: "initialize",
           params: { processId: null, rootUri, capabilities: { general: {} } } },
@@ -787,7 +793,7 @@ main :: () {
             textDocument: { uri }, range: { start: { line: 0, character: 0 }, end: { line: 14, character: 0 } }
         }},
         SHUTDOWN, EXIT,
-    ]);
+    ], { JAI_LSP_ENTRY_FILE: file });
     try { await fs.rm(tmpDir, { recursive: true, force: true }); } catch {}
 
     check("typeDefinitionProvider=true", r.responses[1]?.result?.capabilities?.typeDefinitionProvider === true);
