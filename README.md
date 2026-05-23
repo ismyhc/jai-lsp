@@ -1,7 +1,5 @@
 <img src="vscode-extension/icon.png" alt="jai-lsp" width="80" />
 
-# jai-lsp
-
 A Language Server Protocol implementation for the **Jai** programming language, **written in Jai**. Speaks LSP over stdio so any LSP-capable editor can drive it.
 
 **Ships with integrations for VSCode, Zed, Emacs, and Neovim.**
