@@ -1,6 +1,6 @@
 # Jai LSP for VSCode
 
-Language server support for the **[Jai](https://github.com/jonblow)** programming language. Provides hover with type info, go to definition, find all references, symbol outline, semantic-token highlighting, signature help, inlay hints, and real compiler diagnostics — all powered by the [jai-lsp](https://github.com/ismyhc/jai-lsp) server (written in Jai).
+Language server support for the **Jai** programming language. Provides hover with type info, go to definition, find all references, symbol outline, semantic-token highlighting, signature help, inlay hints, and real compiler diagnostics — all powered by the [jai-lsp](https://github.com/ismyhc/jai-lsp) server (written in Jai).
 
 ## Features
 
