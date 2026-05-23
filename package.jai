@@ -41,6 +41,9 @@ build :: () {
     options := get_build_options(w);
     options.output_executable_name = "jai-lsp";
     options.output_path            = tprint("./%/", BUILD_DIR);
+    // Release build — VERY_OPTIMIZED maps to LLVM -O3 with vectorization.
+    // preserve_debug_info=false drops DWARF/CodeView; smaller binary.
+    set_optimization(*options, .VERY_OPTIMIZED, preserve_debug_info=false);
     set_build_options(options, w);
 
     failed := false;
