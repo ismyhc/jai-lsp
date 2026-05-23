@@ -1,4 +1,4 @@
-<img src="vscode-extension/icon.png" alt="jai-lsp" width="160" />
+<img src="vscode-extension/icon.png" alt="jai-lsp" width="80" />
 
 # jai-lsp
 
