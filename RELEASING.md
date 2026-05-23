@@ -138,8 +138,9 @@ marketplace serves the right one to each user.
 
 ```sh
 cd vscode-extension
-npm install
-npm run compile
+npm install                # full install (devDeps needed to compile)
+npm run compile            # build out/extension.js
+npm prune --production     # drop devDeps so the VSIX stays small
 
 # Package one VSIX per platform (each picks up only its own binary from bin/).
 # The .vscodeignore is set up to include bin/*, but vsce --target picks the
@@ -148,6 +149,9 @@ npx @vscode/vsce package --target darwin-arm64
 npx @vscode/vsce package --target darwin-x64
 npx @vscode/vsce package --target linux-x64
 npx @vscode/vsce package --target win32-x64
+
+# Restore devDeps so you can keep developing.
+npm install
 
 # Publish them all (requires `vsce login` from the appendix).
 npx @vscode/vsce publish --packagePath \
@@ -232,10 +236,12 @@ gh release create v0.1.0 \
     --title "v0.1.0" --notes "..."
 
 cd vscode-extension
+npm install && npm run compile && npm prune --production
 for target in darwin-arm64 darwin-x64 linux-x64 win32-x64; do
     npx @vscode/vsce package --target "$target"
 done
 npx @vscode/vsce publish --packagePath *.vsix
+npm install   # restore devDeps
 ```
 
 ---
@@ -271,5 +277,7 @@ npx @vscode/vsce publish --packagePath *.vsix
 |---|---|
 | `vsce package` fails: "missing publisher" | Add `"publisher": "<name>"` to `vscode-extension/package.json` |
 | Users install VSIX but extension says "spawn jai-lsp ENOENT" | The VSIX didn't include the binary for that platform. Verify `bin/jai-lsp-<platform>-<arch>` exists in the VSIX (`unzip -l *.vsix`). Per-platform packaging fixes this |
+| Extension fails to activate: "Cannot find module 'vscode-languageclient/node'" | `node_modules/` got stripped from the VSIX (old `.vscodeignore` had `node_modules/**`). Make sure your `.vscodeignore` keeps runtime deps. Re-package |
+| `tsc` fails with "Cannot find module 'vscode'" during a release build | You ran `npm prune --production` before `npm run compile`. Order matters: install → compile → prune → package |
 | Zed extension PR rejected | Check the upstream `extensions` repo's CONTRIBUTING for the current schema; format changes occasionally |
 | `gh release create` says "tag already exists" | The tag was pushed but no release was created. Use `gh release create v0.1.0 ...` exactly the same way; gh attaches to the existing tag |

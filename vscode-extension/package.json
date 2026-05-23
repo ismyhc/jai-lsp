@@ -2,6 +2,7 @@
     "name": "jai-lsp-vscode",
     "displayName": "Jai LSP",
     "description": "Language Server Protocol client for the Jai programming language.",
+    "icon": "icon.png",
     "version": "0.1.0",
     "publisher": "jai-lsp",
     "engines": {
