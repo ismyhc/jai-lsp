@@ -8,7 +8,13 @@
 // not — to stderr via the raw write(2) syscall, so even an accidental log
 // from a stdlib module stays off the wire.
 
-#import "POSIX";
+#import "Basic";
+
+// `Windows.*` (named import declared once in platform.jai) on Windows; POSIX
+// for the raw stderr write(2) elsewhere.
+#if OS != .WINDOWS {
+    #import "POSIX";
+}
 
 stderr_logger :: (message: string, data: *void, info: Log_Info) {
     if !message.count return;
@@ -16,11 +22,24 @@ stderr_logger :: (message: string, data: *void, info: Log_Info) {
     // Raw write to stderr; bypass libc buffering so messages aren't held
     // back during a crash. Best-effort: nothing sensible to do if stderr
     // itself fails.
-    write(STDERR_FILENO, message.data, xx message.count);
+    write_stderr(message.data, message.count);
 
     // Make sure each log ends with a newline for human readability.
     if message[message.count - 1] != #char "\n" {
         nl: u8 = #char "\n";
-        write(STDERR_FILENO, *nl, 1);
+        write_stderr(*nl, 1);
+    }
+}
+
+#scope_file
+
+write_stderr :: (buf: *u8, count: int) {
+    #if OS == .WINDOWS {
+        h := Windows.GetStdHandle(Windows.STD_ERROR_HANDLE);
+        if h == Windows.INVALID_HANDLE_VALUE  return;
+        wrote: u32;
+        Windows.WriteFile(h, buf, xx count, *wrote, null);
+    } else {
+        write(STDERR_FILENO, buf, xx count);
     }
 }

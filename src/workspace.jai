@@ -324,7 +324,13 @@ snapshot_symbol :: (sym: Workspace_Symbol) -> Workspace_Symbol {
 // bytes. Authority, query, and fragment are not supported (LSP URIs in
 // practice are bare file URIs).
 
-path_from_uri :: (uri: string) -> string {
+// The public converters bake in the host OS; the `_impl` workers take the
+// platform as a parameter so both branches are testable on any build host
+// (see the `#run` round-trip test below).
+path_from_uri :: (uri:  string) -> string { return path_from_uri_impl(uri,  OS == .WINDOWS); }
+uri_from_path :: (path: string) -> string { return uri_from_path_impl(path, OS == .WINDOWS); }
+
+path_from_uri_impl :: (uri: string, windows: bool) -> string {
     PREFIX :: "file://";
     if !begins_with(uri, PREFIX) return "";
     rest := slice(uri, PREFIX.count, uri.count - PREFIX.count);
@@ -346,17 +352,53 @@ path_from_uri :: (uri: string) -> string {
         append(*builder, c);
         i += 1;
     }
-    return builder_to_string(*builder,, temp);
+    path := builder_to_string(*builder,, temp);
+
+    if windows {
+        // A Windows file URI is `file:///C:/dir/file`. After stripping the
+        // `file://` prefix we are left with a spurious leading slash before
+        // the drive letter (`/C:/dir/file`); drop it so the result is a real
+        // path. Forward slashes are accepted by the Win32 file APIs, so we
+        // leave them as-is. Without this every disk operation (compile target,
+        // signature-help file reads) silently no-ops on Windows.
+        if path.count >= 3 && path[0] == #char "/" && is_drive_letter(path[1]) && path[2] == #char ":" {
+            path = slice(path, 1, path.count - 1);
+        }
+    }
+
+    return path;
 }
 
-uri_from_path :: (path: string) -> string {
+is_drive_letter :: (c: u8) -> bool {
+    return (c >= #char "a" && c <= #char "z") || (c >= #char "A" && c <= #char "Z");
+}
+
+uri_from_path_impl :: (path: string, windows: bool) -> string {
     // Conservative encoder: percent-encode anything outside the unreserved
     // set + "/". Enough for filesystem paths LSP cares about.
     builder: String_Builder;
     builder.allocator = temp;
     append(*builder, "file://");
-    for i: 0..path.count - 1 {
-        c := path[i];
+
+    p := path;
+    if windows {
+        // Drive-letter paths (`C:\dir\file` or `C:/dir/file`) need the third
+        // slash so the URI is `file:///C:/dir/file`, matching what clients
+        // send. Without it the Locations we emit don't round-trip and
+        // go-to-definition lands nowhere.
+        if p.count >= 2 && is_drive_letter(p[0]) && p[1] == #char ":" {
+            append(*builder, #char "/");
+        }
+    }
+
+    for i: 0..p.count - 1 {
+        c := p[i];
+        // On Windows, normalize backslashes to forward slashes rather than
+        // percent-encoding them (`%5C`), which clients won't recognize.
+        if windows && c == #char "\\" {
+            append(*builder, #char "/");
+            continue;
+        }
         if is_uri_safe(c) {
             append(*builder, c);
         } else {
@@ -366,6 +408,34 @@ uri_from_path :: (path: string) -> string {
         }
     }
     return builder_to_string(*builder,, temp);
+}
+
+// Compile-time round-trip test for the URI <-> path converters. Runs on every
+// build, on every host, and covers BOTH the Windows and POSIX branches (the
+// `windows` arg is explicit, so a Linux CI still validates the Windows logic).
+// Regression guard for the Windows drive-letter bug where go-to-definition and
+// signature help broke while syntax highlighting kept working.
+#run {
+    // POSIX: leading slash is part of the path; backslash is a literal byte.
+    assert(path_from_uri_impl("file:///home/u/a.jai", false) == "/home/u/a.jai");
+    assert(uri_from_path_impl("/home/u/a.jai", false)        == "file:///home/u/a.jai");
+
+    // Windows: strip the slash before the drive letter; `\` -> `/`; re-add the
+    // third slash on the way back out. The drive colon is percent-encoded to
+    // `%3A` on the way out (it's not in is_uri_safe) — this matches the
+    // canonical form VSCode itself emits (`Uri.file(...).toString()`), and
+    // path_from_uri decodes it back to `:`.
+    assert(path_from_uri_impl("file:///C:/dir/a.jai",   true) == "C:/dir/a.jai");
+    assert(path_from_uri_impl("file:///C%3A/dir/a.jai", true) == "C:/dir/a.jai");
+    assert(uri_from_path_impl("C:\\dir\\a.jai", true)         == "file:///C%3A/dir/a.jai");
+    assert(uri_from_path_impl("C:/dir/a.jai", true)           == "file:///C%3A/dir/a.jai");
+
+    // Windows round-trip: a VSCode-form client URI -> path -> URI is stable.
+    win_uri := "file:///C%3A/Users/jdavis/a.jai";
+    assert(uri_from_path_impl(path_from_uri_impl(win_uri, true), true) == win_uri);
+
+    // Percent-encoded spaces decode on both platforms.
+    assert(path_from_uri_impl("file:///tmp/a%20b.jai", false) == "/tmp/a b.jai");
 }
 
 #scope_file

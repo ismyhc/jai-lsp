@@ -18,7 +18,7 @@ Language server support for the **Jai** programming language. Provides hover wit
 ## Requirements
 
 - The **Jai compiler** itself (proprietary beta — not bundled). You need this to write Jai code anyway.
-- macOS (Apple Silicon for v0.1.0; other platforms in future releases).
+- macOS, Linux, and Windows.
 
 ## Setup
 

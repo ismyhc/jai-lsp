@@ -1,7 +1,11 @@
 # --- Jai build artifacts ---
-/.build/
+# Match .build anywhere, not just root, so a stray `jai src/main.jai` (which
+# drops src/.build/) is covered too.
+.build/
 /.build-package/
 /jai-lsp
+/jai-lsp.exe
+/jai-lsp.pdb
 /jai-lsp.dSYM/
 
 # --- VSCode extension ---

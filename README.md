@@ -29,7 +29,7 @@ Every editor expects two settings:
 You need the Jai compiler installed.
 
 ```sh
-jai build.jai          # produces ./jai-lsp
+jai build.jai          # produces ./jai-lsp (jai-lsp.exe on Windows)
 ```
 
 For per-platform extension binaries, see [`RELEASING.md`](RELEASING.md).

@@ -7,15 +7,23 @@
 //   \r\n
 //   <N bytes of JSON body>
 //
-// We use raw read(2)/write(2) on STDIN_FILENO / STDOUT_FILENO. This gives
-// us byte-exact control (no libc buffering surprises) and works the same
-// on macOS and Linux. Windows would additionally need _setmode(stdout,
-// _O_BINARY) so \n isn't expanded to \r\n on the way out — punt on Windows
-// support for now; it's a single #if when we get there.
+// On macOS/Linux we use raw read(2)/write(2) on STDIN_FILENO / STDOUT_FILENO.
+// On Windows we use ReadFile/WriteFile on the GetStdHandle handles directly
+// (NOT C stdio), which sidesteps the classic \n -> \r\n text-mode translation
+// — that mangling only happens through the CRT's text streams, not the raw
+// handle. Either way we get byte-exact control with no libc buffering.
+//
+// All three platforms funnel through os_read_stdin / os_write_stdout below so
+// the framing logic stays platform-agnostic.
 
 #import "Basic";
-#import "POSIX";
 #import "String";
+
+// On Windows we use `Windows.*` (the named import lives once in platform.jai,
+// module-wide). On macOS/Linux we pull in POSIX for read/write/poll.
+#if OS != .WINDOWS {
+    #import "POSIX";
+}
 
 // Read a single framed message body from stdin.
 // Returns the body bytes (allocated on the temporary allocator) and ok=true,
@@ -57,12 +65,38 @@ read_message :: () -> body: string, ok: bool {
 // polling background work (e.g., the in-flight type-check subprocess)
 // without spinning.
 poll_stdin :: (timeout_ms: int) -> bool {
-    pfd: pollfd;
-    pfd.fd = STDIN_FILENO;
-    pfd.events = POLLIN;
-    n := poll(*pfd, 1, xx timeout_ms);
-    if n <= 0 return false;
-    return (pfd.revents & POLLIN) != 0;
+    #if OS == .WINDOWS {
+        // There's no poll()/epoll on a stdin HANDLE. LSP clients hand us a
+        // pipe, so we PeekNamedPipe for buffered bytes. A negative timeout
+        // means "block until a message arrives": we return true and let the
+        // blocking ReadFile in read_message() do the waiting — zero CPU while
+        // idle, instead of spinning on Peek.
+        if timeout_ms < 0  return true;
+
+        h := Windows.GetStdHandle(Windows.STD_INPUT_HANDLE);
+        if h == Windows.INVALID_HANDLE_VALUE  return false;
+
+        STEP :: 5;   // ms between peeks
+        elapsed := 0;
+        while true {
+            avail: u32;
+            ok := Windows.PeekNamedPipe(h, null, 0, null, *avail, null);
+            if !ok        return true;   // not a pipe (redirected file/console); fall through to a blocking read
+            if avail > 0  return true;
+            if timeout_ms == 0          return false;
+            if elapsed   >= timeout_ms  return false;
+            sleep_milliseconds(STEP);
+            elapsed += STEP;
+        }
+        return false;  // unreachable
+    } else {
+        pfd: pollfd;
+        pfd.fd = STDIN_FILENO;
+        pfd.events = POLLIN;
+        n := poll(*pfd, 1, xx timeout_ms);
+        if n <= 0 return false;
+        return (pfd.revents & POLLIN) != 0;
+    }
 }
 
 // Write a framed message. `body` is the JSON payload bytes.
@@ -92,7 +126,7 @@ read_headers :: () -> string, bool {
     byte: u8;
 
     while true {
-        n := read(STDIN_FILENO, *byte, 1);
+        n := os_read_stdin(*byte, 1);
         if n == 0 {
             // EOF before headers completed. If we've read nothing, this is
             // a clean close (client exited); otherwise it's truncation.
@@ -185,7 +219,7 @@ read_exact :: (buf: *u8, count: int) -> bool {
     remaining := count;
     cursor    := buf;
     while remaining > 0 {
-        n := read(STDIN_FILENO, cursor, xx remaining);
+        n := os_read_stdin(cursor, remaining);
         if n == 0 return false;       // unexpected EOF
         if n <  0 return false;       // error
         cursor    += n;
@@ -198,12 +232,46 @@ write_all :: (buf: *u8, count: int) {
     remaining := count;
     cursor    := buf;
     while remaining > 0 {
-        n := write(STDOUT_FILENO, cursor, xx remaining);
+        n := os_write_stdout(cursor, remaining);
         if n <= 0 {
             log_error("RPC: write() failed on body");
             return;
         }
         cursor    += n;
         remaining -= n;
+    }
+}
+
+// --- Platform stdio primitives ---------------------------------------------
+//
+// Both return byte counts with read(2)/write(2) semantics so the framing
+// loops above don't care which OS they're on: >0 = bytes transferred,
+// 0 = EOF (read) / would-block, <0 = error.
+
+os_read_stdin :: (buf: *u8, count: int) -> int {
+    #if OS == .WINDOWS {
+        h := Windows.GetStdHandle(Windows.STD_INPUT_HANDLE);
+        if h == Windows.INVALID_HANDLE_VALUE  return -1;
+        got: u32;
+        ok := Windows.ReadFile(h, buf, xx count, *got, null);
+        // A closed write end (client exit) surfaces as ReadFile=FALSE with
+        // ERROR_BROKEN_PIPE. Treat any failure as EOF so the loop ends cleanly.
+        if !ok  return 0;
+        return cast(int) got;
+    } else {
+        return read(STDIN_FILENO, buf, xx count);
+    }
+}
+
+os_write_stdout :: (buf: *u8, count: int) -> int {
+    #if OS == .WINDOWS {
+        h := Windows.GetStdHandle(Windows.STD_OUTPUT_HANDLE);
+        if h == Windows.INVALID_HANDLE_VALUE  return -1;
+        wrote: u32;
+        ok := Windows.WriteFile(h, buf, xx count, *wrote, null);
+        if !ok  return -1;
+        return cast(int) wrote;
+    } else {
+        return write(STDOUT_FILENO, buf, xx count);
     }
 }

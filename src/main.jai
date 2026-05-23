@@ -5,6 +5,7 @@
 
 #import "Basic";
 
+#load "platform.jai";
 #load "log.jai";
 #load "rpc.jai";
 #load "protocol.jai";
